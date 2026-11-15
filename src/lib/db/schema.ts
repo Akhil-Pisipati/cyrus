@@ -48,10 +48,10 @@ export const savedItems = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-    itemType: text("item_type").notNull(), // repo | org | hackathon | program | resource
-    itemId: text("item_id").notNull(), // stable id used by the frontend (owner/name, slug…)
-    title: text("title"),
-    meta: jsonb("meta"),
+    itemType: text("item_type").notNull(), // repo | org | program | issue | search
+    itemId: text("item_id").notNull(), // stable id used by the frontend (owner/name, slug, saved-search id…)
+    title: text("title"), // the label shown; for a search it is the name the contributor typed
+    meta: jsonb("meta"), // for a search: { filters } in the finder's normalised shape
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

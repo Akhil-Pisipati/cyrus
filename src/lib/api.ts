@@ -8,7 +8,7 @@ export type ServerUser = {
   id: string; name: string; login: string | null;
   email: string | null; picture: string | null; provider: string;
 };
-export type SavedRow = { itemType: string; itemId: string; title?: string | null };
+export type SavedRow = { itemType: string; itemId: string; title?: string | null; meta?: unknown; createdAt?: string };
 export type EmailStartRes = {
   ok: boolean; sent?: boolean; demo?: boolean; code?: string; challenge?: string | null;
   reason?: string; error?: string; expires_in_seconds?: number;
@@ -48,7 +48,7 @@ async function postJson<T>(url: string, body: unknown, method: "POST" | "PATCH" 
   }
 }
 
-async function fire(url: string, body: unknown, method: "POST" | "DELETE"): Promise<boolean> {
+async function fire(url: string, body: unknown, method: "POST" | "PATCH" | "DELETE"): Promise<boolean> {
   try {
     const r = await fetch(url, { ...JSON_INIT, method, body: JSON.stringify(body) });
     return r.ok;
@@ -72,8 +72,10 @@ export const api = {
     postJson<EmailVerifyRes>("/api/auth/email/verify", { email, code, name, challenge }),
 
   savedList: () => getJson<{ items: SavedRow[] }>("/api/me/saved"),
-  savedAdd: (itemType: string, itemId: string, title?: string) =>
-    fire("/api/me/saved", { itemType, itemId, title }, "POST"),
+  savedAdd: (itemType: string, itemId: string, title?: string, meta?: unknown) =>
+    fire("/api/me/saved", { itemType, itemId, title, meta }, "POST"),
+  savedRename: (itemType: string, itemId: string, title: string) =>
+    fire("/api/me/saved", { itemType, itemId, title }, "PATCH"),
   savedRemove: (itemType: string, itemId: string) =>
     fire("/api/me/saved", { itemType, itemId }, "DELETE"),
 
