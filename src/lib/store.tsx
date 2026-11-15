@@ -1,11 +1,16 @@
-/* ══ store.tsx — auth, saved items, toasts, modals, server sync ══ */
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+/* ══ store.tsx — auth, saved items, saved searches, toasts, modals, server sync ══ */
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useNavigate } from "./router";
 import { useStored } from "./util";
 import type { User } from "./util";
 import { api, providerReady, type ServerUser } from "./api";
 import { readGoogleRedirectCredential, takeGoogleReturn } from "./google";
+import {
+  SEARCHES_KEY, clipName, hydrateSavedSearch, isEmptySearch, mergeSearches, newSearchId,
+  normaliseFilters, readSearchStore, searchNameError, toSearchStore, today,
+  type SavedSearch, type SearchFilters, type SearchStore,
+} from "./savedSearches";
 
 interface Store {
   user: User | null;
@@ -17,6 +22,13 @@ interface Store {
   toggleSavedOrg: (login: string) => boolean;
   /** drop every followed repository and organization, locally and on the server */
   unfollowAll: () => void;
+  /** named issue-finder searches, newest first; browser-held, mirrored when signed in */
+  searches: SavedSearch[];
+  /** save the search the finder is showing; null when the name or filters are unusable */
+  saveSearch: (name: string, filters: SearchFilters) => SavedSearch | null;
+  /** rename one; false when the name is empty or too long */
+  renameSearch: (id: string, name: string) => boolean;
+  removeSearch: (id: string) => void;
   downloads: Record<string, number>;
   countDownload: (id: string) => void;
   toast: (msg: string) => void;
@@ -43,6 +55,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [userStored, setUser, userReady] = useStored<User | null>("agenthub.user", null);
   const [savedStored, setSaved, savedReady] = useStored<string[]>("agenthub.saved", []);
   const [savedOrgsStored, setSavedOrgs, orgsReady] = useStored<string[]>("agenthub.savedorgs", []);
+  const [searchesStored, setSearches, searchesReady] = useStored<SearchStore>(SEARCHES_KEY, {});
   const [downloadsStored, setDownloads, dlReady] = useStored<Record<string, number>>("agenthub.downloads", {});
   const [toastMsg, setToastMsg] = useState<{ msg: string; k: number } | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -62,11 +75,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const saved = savedReady ? savedStored : [];
   const savedOrgs = orgsReady ? savedOrgsStored : [];
   const downloads = dlReady ? downloadsStored : {};
+  /* read through the tolerant decoder: an entry the key holds that is not a
+     search - an older shape, a hand-edited row - is dropped, not rendered */
+  const storedSearches = useMemo(() => readSearchStore(searchesStored), [searchesStored]);
+  const searches = searchesReady ? storedSearches : [];
 
   /* ── server sync layer (safe no-op when the backend is offline) ── */
   const [serverUser, setServerUser] = useState<ServerUser | null>(null);
   const savedRef = useRef(savedStored); savedRef.current = savedStored;
   const orgsRef = useRef(savedOrgsStored); orgsRef.current = savedOrgsStored;
+  const searchesRef = useRef(searchesStored); searchesRef.current = searchesStored;
   const titleFor = (id: string) => id.split("/")[1] ?? id;
 
   const refreshSession = useCallback(async () => {
@@ -77,17 +95,34 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!list) return;
     const sRepos = [...new Set(list.items.filter((i) => i.itemType === "repo").map((i) => i.itemId))];
     const sOrgs = [...new Set(list.items.filter((i) => i.itemType === "org").map((i) => i.itemId))];
+    /* A search row the page cannot decode is skipped instead of unioned in:
+       a board row that will not open is worse than a missing one. */
+    const sSearches: SavedSearch[] = [];
+    for (const i of list.items) {
+      if (i.itemType !== "search") continue;
+      const s = hydrateSavedSearch(i);
+      if (s) sSearches.push(s);
+    }
     const mine = savedRef.current, ours = orgsRef.current;
     const nextRepos = [...new Set([...sRepos, ...mine])];
     const nextOrgs = [...new Set([...sOrgs, ...ours])];
+    /* one list, newest first: the account's rows for the same id win, since
+       that is where a rename landed, and anything only this browser holds
+       is kept rather than lost to the sign-in */
+    const mergedSearches = mergeSearches(sSearches, readSearchStore(searchesRef.current));
+    const onServer = new Set(sSearches.map((s) => s.id));
     if (nextRepos.length !== mine.length || nextOrgs.length !== ours.length) {
       setSaved(nextRepos);
       setSavedOrgs(nextOrgs);
     }
+    if (JSON.stringify(toSearchStore(mergedSearches)) !== JSON.stringify(searchesRef.current)) {
+      setSearches(toSearchStore(mergedSearches));
+    }
     // push anything this browser has that the server hasn't seen
     for (const id of nextRepos.filter((r) => !sRepos.includes(r))) void api.savedAdd("repo", id, titleFor(id));
     for (const id of nextOrgs.filter((o) => !sOrgs.includes(o))) void api.savedAdd("org", id, titleFor(id));
-  }, [setSaved, setSavedOrgs]);
+    for (const s of mergedSearches.filter((x) => !onServer.has(x.id))) void api.savedAdd("search", s.id, s.name, { filters: s.filters });
+  }, [setSaved, setSavedOrgs, setSearches]);
 
   useEffect(() => { void refreshSession(); }, [refreshSession]);
 
@@ -135,6 +170,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [setUser, setAuthOpen, toast, refreshSession]);
 
   const signIn = useCallback((u: User) => setUser(u), [setUser]);
+  /* Sign-out ends the server session; it does not touch this browser's
+     board. Followed repositories, followed organizations and saved
+     searches all stay put - they are the visitor's own notes, and the next
+     sign-in unions them back up rather than starting from nothing. */
   const signOut = useCallback(() => {
     setUser(null);
     if (serverUser) { void api.logout(); setServerUser(null); }
@@ -164,6 +203,37 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setSavedOrgs([]);
   }, [setSaved, setSavedOrgs, serverUser]);
 
+  /* ── saved issue-finder searches ───────────────────────────────────
+     The browser holds the list and the server mirrors it, exactly like a
+     followed repository: the board works with the backend offline, and an
+     offline write is a local one rather than a failed one. Writes read
+     searchesRef - what this browser actually holds - never the gated
+     placeholder above. UnfollowAll deliberately leaves them alone: a saved
+     search is a question, not a follow. */
+  const saveSearch = useCallback((name: string, filters: SearchFilters) => {
+    const f = normaliseFilters(filters);
+    if (searchNameError(name) || isEmptySearch(f)) return null;
+    const search: SavedSearch = { id: newSearchId(), name: clipName(name), filters: f, added: today() };
+    setSearches({ ...searchesRef.current, [search.id]: search });
+    if (serverUser) void api.savedAdd("search", search.id, search.name, { filters: f });
+    return search;
+  }, [serverUser, setSearches]);
+
+  const renameSearch = useCallback((id: string, name: string) => {
+    const cur = searchesRef.current[id];
+    if (!cur || searchNameError(name)) return false;
+    setSearches({ ...searchesRef.current, [id]: { ...cur, name: clipName(name) } });
+    if (serverUser) void api.savedRename("search", id, clipName(name));
+    return true;
+  }, [serverUser, setSearches]);
+
+  const removeSearch = useCallback((id: string) => {
+    const next = { ...searchesRef.current };
+    delete next[id];
+    setSearches(next);
+    if (serverUser) void api.savedRemove("search", id);
+  }, [serverUser, setSearches]);
+
   const countDownload = useCallback((id: string) => {
     setDownloads({ ...downloadsStored, [id]: (downloadsStored[id] || 0) + 1 });
   }, [downloadsStored, setDownloads]);
@@ -191,6 +261,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={{
       user, signIn, signOut, saved, toggleSaved, savedOrgs, toggleSavedOrg, unfollowAll,
+      searches, saveSearch, renameSearch, removeSearch,
       downloads, countDownload,
       toast: (m: string) => toast(m), authOpen, setAuthOpen, paletteOpen, setPaletteOpen,
       theme, toggleTheme, serverUser, refreshSession, boardReady: userReady,
