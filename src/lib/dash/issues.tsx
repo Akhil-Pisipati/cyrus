@@ -11,6 +11,7 @@ import { avatarOf, fmtCompact } from "../util";
 import { ISSUE_SIGNALS } from "../../data/issueSignals";
 import { Card, DashHead, Ic, StatRow } from "./shell";
 import { ArtLedger } from "./art";
+import { SavedSearchesPanel } from "./searches";
 import {
   DP, ISSUE_STAGES, STAGE_CLS, STAGE_LABEL, STAGE_NEXT,
   daysAgo, isStale, type IssueStage, type TrackedIssue,
@@ -270,6 +271,10 @@ export function IssuesSection({ d }: { d: Dash }) {
           </p>
         </Card>
       )}
+
+      {/* the searches, not the issues: what a contributor keeps re-running
+          on the finder, kept as filters so it re-reads the current crawl */}
+      <SavedSearchesPanel d={d} />
 
       {offered.length > 0 && (
         <Card>
